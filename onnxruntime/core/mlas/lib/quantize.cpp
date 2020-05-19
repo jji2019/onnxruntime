@@ -280,7 +280,8 @@ MlasQLinearAddKernel(
     float ScaleC,
     DataType ZeroPointC,
     DataType* OutputC,
-    size_t N
+    size_t LengthA,
+    size_t LengthB
     )
 {
     constexpr int32_t MinimumValue = std::numeric_limits<DataType>::min();
@@ -295,43 +296,99 @@ MlasQLinearAddKernel(
     const auto MinimumValueVectorC = MlasBroadcastFloat32x4(float(MinimumValue - ZeroPointC));
     const auto MaximumValueVectorC = MlasBroadcastFloat32x4(float(MaximumValue - ZeroPointC));
 
-    while (N >= 4) {
-        auto IntegerVectorA = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputA)));
-        auto IntegerVectorB = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputB)));
-        auto FloatVectorC = MlasAddFloat32x4(
-                MlasDequantizeLinearVector(IntegerVectorA, ScaleVectorA, ZeroPointVectorA),
-                MlasDequantizeLinearVector(IntegerVectorB, ScaleVectorB, ZeroPointVectorB));
-        auto IntegerVectorC = MlasQuantizeLinearVector(FloatVectorC, ScaleVectorC,
-                MinimumValueVectorC, MaximumValueVectorC, ZeroPointVectorC);
-        IntegerVectorC = MlasQuantizeLinearPackBytes<DataType>(IntegerVectorC);
+    size_t N = std::max(LengthA, LengthB);
+    if (LengthA == 1) {
+        auto IntegerVectorA = MlasBroadcastInt32x4((int32_t)*InputA));
+        auto FloatVectorA = MlasDequantizeLinearVector(IntegerVectorA, ScaleVectorA, ZeroPointVectorA);
+        while (N >= 4) {
+            auto IntegerVectorB = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputB)));
+            auto FloatVectorC = MlasAddFloat32x4(
+                    FloatVectorA,
+                    MlasDequantizeLinearVector(IntegerVectorB, ScaleVectorB, ZeroPointVectorB));
+            auto IntegerVectorC = MlasQuantizeLinearVector(FloatVectorC, ScaleVectorC,
+                    MinimumValueVectorC, MaximumValueVectorC, ZeroPointVectorC);
+            IntegerVectorC = MlasQuantizeLinearPackBytes<DataType>(IntegerVectorC);
 
 #if defined(MLAS_NEON64_INTRINSICS)
-        vst1q_lane_s32((int32_t*)OutputC, IntegerVectorC, 0);
+            vst1q_lane_s32((int32_t*)OutputC, IntegerVectorC, 0);
 #else
-        *((int32_t*)OutputC) = _mm_cvtsi128_si32(IntegerVectorC);
+            *((int32_t*)OutputC) = _mm_cvtsi128_si32(IntegerVectorC);
 #endif
 
-        InputA += 4;
-        InputB += 4;
-        OutputC += 4;
-        N -= 4;
+            InputB += 4;
+            OutputC += 4;
+            N -= 4;
+        }
+    }
+    else if (LengthB == 1) {
+        auto IntegerVectorB = MlasBroadcastInt32x4((int32_t)*InputB));
+        auto FloatVectorB = MlasDequantizeLinearVector(IntegerVectorB, ScaleVectorB, ZeroPointVectorB);
+        while (N >= 4) {
+            auto IntegerVectorA = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputA)));
+            auto FloatVectorC = MlasAddFloat32x4(
+                    MlasDequantizeLinearVector(IntegerVectorA, ScaleVectorA, ZeroPointVectorA),
+                    FloatVectorB);
+            auto IntegerVectorC = MlasQuantizeLinearVector(FloatVectorC, ScaleVectorC,
+                    MinimumValueVectorC, MaximumValueVectorC, ZeroPointVectorC);
+            IntegerVectorC = MlasQuantizeLinearPackBytes<DataType>(IntegerVectorC);
+
+#if defined(MLAS_NEON64_INTRINSICS)
+            vst1q_lane_s32((int32_t*)OutputC, IntegerVectorC, 0);
+#else
+            *((int32_t*)OutputC) = _mm_cvtsi128_si32(IntegerVectorC);
+#endif
+
+            InputA += 4;
+            OutputC += 4;
+            N -= 4;
+        }
+    }
+    else {
+        while (N >= 4) {
+            auto IntegerVectorA = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputA)));
+            auto IntegerVectorB = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputB)));
+            auto FloatVectorC = MlasAddFloat32x4(
+                    MlasDequantizeLinearVector(IntegerVectorA, ScaleVectorA, ZeroPointVectorA),
+                    MlasDequantizeLinearVector(IntegerVectorB, ScaleVectorB, ZeroPointVectorB));
+            auto IntegerVectorC = MlasQuantizeLinearVector(FloatVectorC, ScaleVectorC,
+                    MinimumValueVectorC, MaximumValueVectorC, ZeroPointVectorC);
+            IntegerVectorC = MlasQuantizeLinearPackBytes<DataType>(IntegerVectorC);
+
+#if defined(MLAS_NEON64_INTRINSICS)
+            vst1q_lane_s32((int32_t*)OutputC, IntegerVectorC, 0);
+#else
+            *((int32_t*)OutputC) = _mm_cvtsi128_si32(IntegerVectorC);
+#endif
+
+            InputA += 4;
+            InputB += 4;
+            OutputC += 4;
+            N -= 4;
+        }
+
     }
 
     if (N > 0) {
-        auto IntegerVectorA = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputA)));
-        auto IntegerVectorB = MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputB)));
+        auto IntegerVectorA = (LengthA == 1) ?
+                MlasBroadcastInt32x4((int32_t)*InputA)) :
+                MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputA)));
+        auto IntegerVectorB = (LengthB == 1) ?
+                MlasBroadcastInt32x4((int32_t)*InputB)) :
+                MlasQuantizeLinearUnpackBytes<DataType>(MlasBroadcastInt32x4(*((const int32_t*)InputB)));
         auto FloatVectorC = MlasAddFloat32x4(
                 MlasDequantizeLinearVector(IntegerVectorA, ScaleVectorA, ZeroPointVectorA),
                 MlasDequantizeLinearVector(IntegerVectorB, ScaleVectorB, ZeroPointVectorB));
         auto IntegerVectorC = MlasQuantizeLinearVector(FloatVectorC, ScaleVectorC,
                 MinimumValueVectorC, MaximumValueVectorC, ZeroPointVectorC);
         IntegerVectorC = MlasQuantizeLinearPackBytes<DataType>(IntegerVectorC);
+
         uint32_t PackedValueC = 0;
 #if defined(MLAS_NEON64_INTRINSICS)
         vst1q_lane_s32((int32_t*)&PackedValueC, IntegerVectorC, 0);
 #else
         *((int32_t*)&PackedValueC) = _mm_cvtsi128_si32(IntegerVectorC);
 #endif
+
         for (size_t n = 0; n < N; ++n) {
             *((uint8_t*)OutputC + n) = (uint8_t)PackedValueC;
             PackedValueC >>= 8;
@@ -426,19 +483,43 @@ MlasQLinearAddKernel(
     float ScaleC,
     DataType ZeroPointC,
     DataType* OutputC,
-    size_t N
+    size_t LengthA,
+    size_t LengthB
     )
 {
     constexpr int32_t MinimumValue = std::numeric_limits<DataType>::min();
     constexpr int32_t MaximumValue = std::numeric_limits<DataType>::max();
 
-    for (size_t n = 0; n < N; n++) {
-        float ValueA = ScaleA * (int(InputA[n]) - int(ZeroPointA));
-        float ValueB = ScaleB * (int(InputB[n]) - int(ZeroPointB));
-        int32_t IntValueC = (int32_t)std::nearbyintf((ValueA + ValueB) / ScaleC) + int32_t(ZeroPointC);
-        IntValueC = std::max(IntValueC, MinimumValue);
-        IntValueC = std::min(IntValueC, MaximumValue);
-        OutputC[n] = (DataType)IntValueC;
+    size_t N = std::max(LengthA, LengthB);
+    if (LengthA == 1) {
+        float ValueA = ScaleA * (int(InputA[0]) - int(ZeroPointA));
+        for (size_t n = 0; n < N; n++) {
+            float ValueB = ScaleB * (int(InputB[n]) - int(ZeroPointB));
+            int32_t IntValueC = (int32_t)std::nearbyintf((ValueA + ValueB) / ScaleC) + int32_t(ZeroPointC);
+            IntValueC = std::max(IntValueC, MinimumValue);
+            IntValueC = std::min(IntValueC, MaximumValue);
+            OutputC[n] = (DataType)IntValueC;
+        }
+    }
+    else if (LengthB == 1) {
+        float ValueB = ScaleB * (int(InputB[0]) - int(ZeroPointB));
+        for (size_t n = 0; n < N; n++) {
+            float ValueA = ScaleA * (int(InputA[n]) - int(ZeroPointA));
+            int32_t IntValueC = (int32_t)std::nearbyintf((ValueA + ValueB) / ScaleC) + int32_t(ZeroPointC);
+            IntValueC = std::max(IntValueC, MinimumValue);
+            IntValueC = std::min(IntValueC, MaximumValue);
+            OutputC[n] = (DataType)IntValueC;
+        }
+    }
+    else {
+        for (size_t n = 0; n < N; n++) {
+            float ValueA = ScaleA * (int(InputA[n]) - int(ZeroPointA));
+            float ValueB = ScaleB * (int(InputB[n]) - int(ZeroPointB));
+            int32_t IntValueC = (int32_t)std::nearbyintf((ValueA + ValueB) / ScaleC) + int32_t(ZeroPointC);
+            IntValueC = std::max(IntValueC, MinimumValue);
+            IntValueC = std::min(IntValueC, MaximumValue);
+            OutputC[n] = (DataType)IntValueC;
+        }
     }
 }
 
@@ -617,13 +698,15 @@ MlasQLinearAddS8Kernel(
     float ScaleC,
     int8_t ZeroPointC,
     int8_t* OutputC,
-    size_t N
+    size_t LengthA,
+    size_t LengthB
     )
 {
     MlasQLinearAddKernel<int8_t>(
         InputA, ScaleA, ZeroPointA,
         InputB, ScaleB, ZeroPointB,
-        ScaleC, ZeroPointC, OutputC, N
+        ScaleC, ZeroPointC, OutputC,
+        LengthA, LengthB
     );
 }
 
@@ -639,13 +722,15 @@ MlasQLinearAddU8Kernel(
     float ScaleC,
     uint8_t ZeroPointC,
     uint8_t* OutputC,
-    size_t N
+    size_t LengthA,
+    size_t LengthB
     )
 {
     MlasQLinearAddKernel<uint8_t>(
         InputA, ScaleA, ZeroPointA,
         InputB, ScaleB, ZeroPointB,
-        ScaleC, ZeroPointC, OutputC, N
+        ScaleC, ZeroPointC, OutputC,
+        LengthA, LengthB
     );
 }
 
@@ -664,7 +749,8 @@ public:
         float ScaleC,
         T ZeroPointC,
         T* OutputC,
-        size_t N
+        size_t LengthA,
+        size_t LengthB
         );
 
     typedef KernelFunction* PKernelFunction;
@@ -687,57 +773,6 @@ MlasQLinearAddPlatformKernel<int8_t>::GetKernel()
 }
 
 template <typename T>
-struct MlasQLinearAddBatch {
-    MlasQLinearAddBatch(
-        const T* InputA, float ScaleA, T ZeroPointA,
-        const T* InputB, float ScaleB, T ZeroPointB,
-        float ScaleC, T ZeroPointC, T* OutputC, size_t N, int32_t ThreadCount) :
-            InputA_(InputA), ScaleA_(ScaleA), ZeroPointA_(ZeroPointA),
-            InputB_(InputB), ScaleB_(ScaleB), ZeroPointB_(ZeroPointB),
-            ScaleC_(ScaleC), ZeroPointC_(ZeroPointC), OutputC_(OutputC), N_(N),
-            BatchCount_(1), ThreadingBatch_(32*1024) {
-        if (ThreadCount > 1) {
-            BatchCount_ = (static_cast<int64_t>(N_) + ThreadingBatch_ - 1) / ThreadingBatch_;
-            if (BatchCount_ > ThreadCount * 3) { // adjust if too many batches
-                ThreadingBatch_ = (N / (ThreadCount * 3) + 4095) & 0xFFFFFFFFFFFFF000;
-                BatchCount_ = (static_cast<int64_t>(N_) + ThreadingBatch_ - 1) / ThreadingBatch_;
-            }
-        }
-    }
-
-    void operator()(int32_t Index) const {
-#if defined(MLAS_TARGET_AMD64)
-        auto kernel = MlasQLinearAddPlatformKernel<T>::GetKernel();
-        kernel(
-#else
-        MlasQLinearAddKernel<int8_t>(
-#endif
-            InputA_ + Index * ThreadingBatch_, ScaleA_, ZeroPointA_,
-            InputB_ + Index * ThreadingBatch_, ScaleB_, ZeroPointB_,
-            ScaleC_, ZeroPointC_, OutputC_ + Index * ThreadingBatch_,
-            (Index == BatchCount_ - 1) ? (N_ - ThreadingBatch_ * (BatchCount_ - 1)) : ThreadingBatch_);
-    }
-
-    static void ThreadingRoutine(void* Context, int32_t Index) {
-        const MlasQLinearAddBatch& BatchContext = *reinterpret_cast<const MlasQLinearAddBatch*>(Context);
-        BatchContext(Index);
-    }
-
-    const T* InputA_;
-    float ScaleA_;
-    T ZeroPointA_;
-    const T* InputB_;
-    float ScaleB_;
-    T ZeroPointB_;
-    float ScaleC_;
-    T ZeroPointC_;
-    T* OutputC_;
-    size_t N_;
-    int64_t BatchCount_;
-    int64_t ThreadingBatch_;
-};
-
-template <typename T>
 void
 MLASCALL
 MlasQLinearAdd(
@@ -750,14 +785,17 @@ MlasQLinearAdd(
     float ScaleC,
     T ZeroPointC,
     T* OutputC,
-    size_t N,
-    MLAS_THREADPOOL* ThreadPool
+    size_t LengthA,
+    size_t LengthB
     )
 {
-    MlasQLinearAddBatch<T> BatchContext(
-        InputA, ScaleA, ZeroPointA, InputB, ScaleB, ZeroPointB, ScaleC, ZeroPointC, OutputC, N, MlasGetMaximumThreadCount(ThreadPool));
-
-    MlasExecuteThreaded(MlasQLinearAddBatch<T>::ThreadingRoutine, &BatchContext, (int)BatchContext.BatchCount_, ThreadPool);
+#if defined(MLAS_TARGET_AMD64)
+        auto kernel = MlasQLinearAddPlatformKernel<T>::GetKernel();
+        kernel(
+#else
+        MlasQLinearAddKernel<T>(
+#endif
+            InputA, ScaleA, ZeroPointA, InputB, ScaleB, ZeroPointB, ScaleC, ZeroPointC, OutputC, LengthA, LengthB);
 }
 
 
@@ -774,8 +812,8 @@ MlasQLinearAdd<int8_t>(
     float ScaleC,
     int8_t ZeroPointC,
     int8_t* OutputC,
-    size_t N,
-    MLAS_THREADPOOL* ThreadPool
+    size_t LengthA,
+    size_t LengthB
     );
 
 template
@@ -791,8 +829,8 @@ MlasQLinearAdd<uint8_t>(
     float ScaleC,
     uint8_t ZeroPointC,
     uint8_t* OutputC,
-    size_t N,
-    MLAS_THREADPOOL* ThreadPool
+    size_t LengthA,
+    size_t LengthB
     );
 
 MLAS_INTERNAL_DATA  MLAS_DECLSPEC_ALIGN(const uint8_t MLasPackBytesMM256VpshufbControl[32], 32) = {

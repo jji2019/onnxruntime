@@ -462,6 +462,9 @@ MlasRequantizeOutput(
     uint8_t ZeroPoint
     );
 
+//
+// LengthA == LengthB, or (LengthA == 1 or LengthB == 1), broadcasting semantic
+//
 template<typename DataType>
 void
 MLASCALL
@@ -475,6 +478,6 @@ MlasQLinearAdd(
     float ScaleC,
     DataType ZeroPointC,
     DataType* OutputC,
-    size_t N,
-    MLAS_THREADPOOL* ThreadPool
+    size_t LengthA,
+    size_t LengthB
     );

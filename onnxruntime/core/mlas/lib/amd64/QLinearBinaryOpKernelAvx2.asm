@@ -48,7 +48,8 @@ QLinearBinaryOpFrame STRUCT
         ScaleC QWORD ?
         ZeroPointC QWORD ?
         OutputC QWORD ?
-        N QWORD ?
+        LengthA QWORD ?
+        LengthB QWord ?
 QLinearBinaryOpFrame ENDS
 
 ;
@@ -73,6 +74,31 @@ IFIDN <DataType>, <S8>
 ELSE
         movzx Target,BYTE PTR Source
 ENDIF
+        ENDM
+
+;
+; Macro Description:
+;
+;   This macro generates code to broadcast one (s/u)int8 to 8 x int32,
+;   according to signed/unsigned.
+;
+; Arguments:
+;   TargetYmm - target ymm register.
+;
+;   TargetXmm -- intermedia xmm register used
+;
+;   Source - Supplies address of 8 x 8bits integers.
+;
+;   DataType - S8 or U8
+;
+
+BroadcastByteDWords MACRO TargetYmm, TargetXmm, Source, DataType
+IFIDN <DataType>, <S8> 
+        movsx TargetXmm,BYTE PTR Source
+ELSE
+        movzx TargetXmm,BYTE PTR Source
+ENDIF
+        vpbroadcastd TargetYmm,TargetXmm
         ENDM
 
 
@@ -185,7 +211,10 @@ QLinearBinaryOpAvx2 MACRO DataType, OpName, OpInstruction
 ;
 ;    OutputC - Supplies the address of OutputC.
 ;
-;    N - Supplies the number of elements to calculate.
+;    LengthA - Supplies the number of elements of InputA.
+;
+;    LengthB - Supplies the number of elements of InputB.
+;              LengthB == LengthA or LengthA == 1 or LengthB == 1.
 ;
 ; Return Value:
 ;
@@ -224,38 +253,93 @@ QLinearBinaryOpAvx2 MACRO DataType, OpName, OpInstruction
         vmovaps ymm11,[r8]
 
         SetMax8BitsValue rdx,DataType
-        movq         xmm6,rdx
+        movq    xmm6,rdx
         vbroadcastss ymm6,xmm6
-        vpsubd       ymm6,ymm6,ymm5
+        vpsubd  ymm6,ymm6,ymm5
 
         SetMin8BitsValue r8,DataType
-        movq         xmm7,r8
+        movq    xmm7,r8
         vbroadcastss ymm7,xmm7
-        vpsubd       ymm7,ymm7,ymm5
+        vpsubd  ymm7,ymm7,ymm5
 
-        mov     rdx,QLinearBinaryOpFrame.N[rsp]
         mov     rax,QWORD PTR 8
         mov     r8,QLinearBinaryOpFrame.OutputC[rsp]
+        mov     rdx,QLinearBinaryOpFrame.LengthA[rsp]
+        cmp     rdx,QWORD PTR 1
+        jae     QLinear&OpName&&DataType&Avx2Process8EntranceScalarOnVector
 
-QLinear&OpName&&DataType&Avx2Process8Loop:
+QLinear&OpName&&DataType&Avx2Process8EntranceScalarOnVector:
+        mov     rdx,QLinearBinaryOpFrame.LengthB[rsp]
+        test    rdx,rdx
+        jz      QLinear&OpName&&DataType&Avx2Exit
+        BroadcastByteDWords ymm8,xmm8,[rcx],DataType
+        vpsubd  ymm8,ymm8,ymm3                  ; - ZeroPointA
+        vcvtdq2ps ymm8,ymm8                     ; FloatVectorA
+        vmulps  ymm8,ymm8,ymm0                  ; * ScaleA
+        
+QLinear&OpName&&DataType&Avx2Process8LoopScalarOnVector:
         test    rdx,rdx
         jz      QLinear&OpName&&DataType&Avx2Exit
 
-        UnpackBytesDWords ymm8,[rcx],DataType
-        UnpackBytesDWords ymm9,[r9],DataType
-        vpsubd  ymm9,ymm9,ymm4                  ; - Zero Points respectively
-        vpsubd  ymm8,ymm8,ymm3
-        vcvtdq2ps ymm8,ymm8                     ; convert to float
-        vcvtdq2ps ymm9,ymm9
-        vmulps  ymm8,ymm8,ymm0                  ; * Scales respectively 
-        vmulps  ymm9,ymm9,ymm1
+        UnpackBytesDWords ymm9,[r9],DataType    ; IntegerVectorB
+        vpsubd  ymm9,ymm9,ymm4                  ; - ZeroPointB
+        vcvtdq2ps ymm9,ymm9                     ; FloatVectorB
+        vmulps  ymm9,ymm9,ymm1                  ; * ScaleB
+
+        OpInstruction  ymm9,ymm8,ymm9           ; OpName two float values
+
+        vdivps  ymm9,ymm9,ymm2                  ; Quantize 8 values, / ScaleC
+        add     r9,rax                          ; out-of-order instruction(s)
+        vcvtps2dq ymm9,ymm9                     ; nearbyintf()
+        vpmaxsd ymm9,ymm9,ymm7
+        vpminsd ymm9,ymm9,ymm6
+        vpaddd  ymm9,ymm9,ymm5                  ; + ZeroPointC
+        vpshufb ymm9,ymm9,ymm10                 ; pack 32bits integers into 8bit integers
+        vpermps ymm9,ymm11,ymm9
+
+        sub     rdx,rax
+        jb      QLinear&OpName&&DataType&Avx2StoreLessThan8ScalarOnVector
+
+        movsd   QWORD PTR [r8],xmm9
+        add     r8,rax
+        jmp     QLinear&OpName&&DataType&Avx2Process8LoopScalarOnVector
+
+QLinear&OpName&&DataType&Avx2StoreLessThan8ScalarOnVector:
+        add     rdx,rax
+        pextrq  rax,xmm9,0
+
+QLinear&OpName&&DataType&Avx2StoreLoopScalarOnVector:
+        mov     BYTE PTR [r8],al
+        shr     rax,8
+        inc     r8
+        dec     rdx
+        jnz     QLinear&OpName&&DataType&Avx2StoreLoopScalarOnVector
+        jmp      QLinear&OpName&&DataType&Avx2Exit
+
+
+QLinear&OpName&&DataType&Avx2Process8EntranceVectorOnScalar:
+        mov     rdx,QLinearBinaryOpFrame.LengthB[rsp]
+        test    rdx,rdx
+        jz      QLinear&OpName&&DataType&Avx2Exit
+        BroadcastByteDWords ymm9,xmm9,[r9],DataType ; IntegerVectorB
+        vpsubd  ymm9,ymm9,ymm4                  ; - ZeroPointB
+        vcvtdq2ps ymm9,ymm9                     ; FloatVectorB
+        vmulps  ymm9,ymm9,ymm1                  ; * ScaleB
+
+QLinear&OpName&&DataType&Avx2Process8LoopVectorOnScalar:
+        test    rdx,rdx
+        jz      QLinear&OpName&&DataType&Avx2Exit
+
+        UnpackBytesDWords ymm8,[rcx],DataType   ; IntegerVectorA
+        vpsubd  ymm8,ymm8,ymm3                  ; - ZeroPointA
+        vcvtdq2ps ymm8,ymm8                     ; FloatVectorA
+        vmulps  ymm8,ymm8,ymm0                  ; * ScaleA
 
         OpInstruction  ymm8,ymm8,ymm9           ; OpName two float values
 
         vdivps  ymm8,ymm8,ymm2                  ; Quantize 8 values, / ScaleC
-        add     rcx,rax                         ; two out-of-order instructions
-        add     r9,rax
-        vcvtps2dq ymm8,ymm8                     ; round()
+        add     rcx,rax                         ; out-of-order instruction(s)
+        vcvtps2dq ymm8,ymm8                     ; nearbyintf()()
         vpmaxsd ymm8,ymm8,ymm7
         vpminsd ymm8,ymm8,ymm6
         vpaddd  ymm8,ymm8,ymm5                  ; + ZeroPointC
@@ -263,22 +347,68 @@ QLinear&OpName&&DataType&Avx2Process8Loop:
         vpermps ymm8,ymm11,ymm8
 
         sub     rdx,rax
-        jb      QLinear&OpName&&DataType&Avx2StoreLessThan8
+        jb      QLinear&OpName&&DataType&Avx2StoreLessThan8VectorOnScalar
 
         movsd   QWORD PTR [r8],xmm8
         add     r8,rax
-        jmp     QLinear&OpName&&DataType&Avx2Process8Loop
+        jmp     QLinear&OpName&&DataType&Avx2Process8LoopVectorOnScalar
 
-QLinear&OpName&&DataType&Avx2StoreLessThan8:
+QLinear&OpName&&DataType&Avx2StoreLessThan8VectorOnScalar:
         add     rdx,rax
         pextrq  rax,xmm8,0
 
-QLinear&OpName&&DataType&Avx2StoreLoop:
+QLinear&OpName&&DataType&Avx2StoreLoopVectorOnScalar:
         mov     BYTE PTR [r8],al
         shr     rax,8
         inc     r8
         dec     rdx
-        jnz     QLinear&OpName&&DataType&Avx2StoreLoop
+        jnz     QLinear&OpName&&DataType&Avx2StoreLoopVectorOnScalar
+
+        jmp      QLinear&OpName&&DataType&Avx2Exit
+
+
+QLinear&OpName&&DataType&Avx2Process8LoopVectorOnVector:
+        test    rdx,rdx
+        jz      QLinear&OpName&&DataType&Avx2Exit
+
+        UnpackBytesDWords ymm8,[rcx],DataType   ; IntegerVectorA
+        UnpackBytesDWords ymm9,[r9],DataType    ; IntegerVectorB
+        vpsubd  ymm8,ymm8,ymm3                  ; - ZeroPointA
+        vpsubd  ymm9,ymm9,ymm4                  ; - ZeroPointB
+        vcvtdq2ps ymm8,ymm8                     ; FloatVectorA
+        vcvtdq2ps ymm9,ymm9                     ; FloatVectorB
+        vmulps  ymm8,ymm8,ymm0                  ; * ScaleA
+        vmulps  ymm9,ymm9,ymm1                  ; * ScaleB
+
+        OpInstruction  ymm8,ymm8,ymm9           ; OpName two float values
+
+        vdivps  ymm8,ymm8,ymm2                  ; Quantize 8 values, / ScaleC
+        add     rcx,rax                         ; out-of-order instruction(s)
+        add     r9,rax                          ; out-of-order instruction(s)
+        vcvtps2dq ymm8,ymm8                     ; nearbyintf()
+        vpmaxsd ymm8,ymm8,ymm7
+        vpminsd ymm8,ymm8,ymm6
+        vpaddd  ymm8,ymm8,ymm5                  ; + ZeroPointC
+        vpshufb ymm8,ymm8,ymm10                 ; pack 32bits integers into 8bit integers
+        vpermps ymm8,ymm11,ymm8
+
+        sub     rdx,rax
+        jb      QLinear&OpName&&DataType&Avx2StoreLessThan8VectorOnVector
+
+        movsd   QWORD PTR [r8],xmm8
+        add     r8,rax
+        jmp     QLinear&OpName&&DataType&Avx2Process8LoopVectorOnVector
+
+QLinear&OpName&&DataType&Avx2StoreLessThan8VectorOnVector:
+        add     rdx,rax
+        pextrq  rax,xmm8,0
+
+QLinear&OpName&&DataType&Avx2StoreLoopVectorOnVector:
+        mov     BYTE PTR [r8],al
+        shr     rax,8
+        inc     r8
+        dec     rdx
+        jnz     QLinear&OpName&&DataType&Avx2StoreLoopVectorOnVector
 
 QLinear&OpName&&DataType&Avx2Exit:
         vzeroupper
